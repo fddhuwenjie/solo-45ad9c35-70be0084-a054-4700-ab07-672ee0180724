@@ -1,0 +1,1460 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "数字取证移动介质交接核对 API",
+    "description": "# 移动介质证物交接核对本地 API\n\n供数字取证人员核对移动介质（U盘、移动硬盘、手机镜像等）交接材料的**本地** REST API。\n\n## 核心能力\n\n* **规范化、可复现的清单版本**：固定字段、键排序、UTF-8 无空白 JSON；封存时固化\n  `manifest_hash = SHA256(规范化字节)` 与 **Merkle 根**。\n* **路径归一化识别重复/歧义**：统一分隔符后做 Unicode **NFKC** 归一化 +\n  `casefold` 折叠键，可识别大小写差异（`Report.pdf` / `REPORT.PDF`）、\n  全角/半角、兼容字符（如连字、罗马数字）等同形异码路径。\n* **封存不可变 + 关联更正版本**：封存后原版本只读；任何更正生成同一 `lineage_id`\n  下的新版本（`supersedes_id` 指向前版本），并校验版本链。\n* **逐项验证**：上传重新采集的元数据或哈希列表，返回\n  新增 / 缺失 / 改名候选 / 内容变化 / 时间异常 / **分块损坏字节范围**，\n  并检查交接顺序、签收时间倒置、身份缺失、版本链与 **Merkle 根断链**。\n* **仅追加审计哈希链**：每次状态变化写入事件，返回 `prev_hash` 与 `event_hash`；\n  SQLite 触发器在数据库层禁止审计表 UPDATE/DELETE。\n* **导出**：JSON 证据包与人类可读 Markdown 核验报告。\n\n所有数据保存在本地 SQLite（默认 `./data/forensic.db`，可用环境变量\n`FORENSIC_DB` 覆盖），不依赖任何外部服务。\n",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "健康检查",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/manifests": {
+      "post": {
+        "tags": [
+          "manifests"
+        ],
+        "summary": "创建清单（v1，open 状态）",
+        "operationId": "create_manifest_api_v1_manifests_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManifestCreateIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "manifests"
+        ],
+        "summary": "列出/检索清单",
+        "operationId": "list_manifests_api_v1_manifests_get",
+        "parameters": [
+          {
+            "name": "case_no",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Case No"
+            }
+          },
+          {
+            "name": "evidence_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Evidence Id"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(open|sealed)$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/manifests/{manifest_id}": {
+      "get": {
+        "tags": [
+          "manifests"
+        ],
+        "summary": "获取清单详情",
+        "operationId": "get_manifest_api_v1_manifests__manifest_id__get",
+        "parameters": [
+          {
+            "name": "manifest_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Manifest Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/manifests/{manifest_id}/entries": {
+      "post": {
+        "tags": [
+          "manifests"
+        ],
+        "summary": "向 open 清单追加条目",
+        "operationId": "append_entries_api_v1_manifests__manifest_id__entries_post",
+        "parameters": [
+          {
+            "name": "manifest_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Manifest Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppendEntriesIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/manifests/{manifest_id}/seal": {
+      "post": {
+        "tags": [
+          "manifests"
+        ],
+        "summary": "封存清单：固化规范化字节、manifest_hash 与 Merkle 根",
+        "operationId": "seal_api_v1_manifests__manifest_id__seal_post",
+        "parameters": [
+          {
+            "name": "manifest_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Manifest Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SealIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/manifests/{manifest_id}/correct": {
+      "post": {
+        "tags": [
+          "manifests"
+        ],
+        "summary": "对已封存清单更正，生成同 lineage 的关联新版本",
+        "operationId": "correct_api_v1_manifests__manifest_id__correct_post",
+        "parameters": [
+          {
+            "name": "manifest_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Manifest Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CorrectIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/manifests/{manifest_id}/handoffs": {
+      "post": {
+        "tags": [
+          "custody"
+        ],
+        "summary": "记录一次交接（封存后）",
+        "operationId": "create_handoff_api_v1_manifests__manifest_id__handoffs_post",
+        "parameters": [
+          {
+            "name": "manifest_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Manifest Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HandoffCreateIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "custody"
+        ],
+        "summary": "交接记录列表",
+        "operationId": "list_handoffs_api_v1_manifests__manifest_id__handoffs_get",
+        "parameters": [
+          {
+            "name": "manifest_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Manifest Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/handoffs/{handoff_id}/signoff": {
+      "post": {
+        "tags": [
+          "custody"
+        ],
+        "summary": "交接签收（actor 留空将记录身份缺失）",
+        "operationId": "signoff_api_v1_handoffs__handoff_id__signoff_post",
+        "parameters": [
+          {
+            "name": "handoff_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Handoff Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignoffIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/manifests/{manifest_id}/verify/metadata": {
+      "post": {
+        "tags": [
+          "verification"
+        ],
+        "summary": "上传重新采集的完整元数据进行逐项核验",
+        "operationId": "verify_metadata_api_v1_manifests__manifest_id__verify_metadata_post",
+        "parameters": [
+          {
+            "name": "manifest_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Manifest Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyMetadataIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/manifests/{manifest_id}/verify/hash-list": {
+      "post": {
+        "tags": [
+          "verification"
+        ],
+        "summary": "上传路径+哈希列表进行核验（字节数/时间可缺省）",
+        "operationId": "verify_hash_list_api_v1_manifests__manifest_id__verify_hash_list_post",
+        "parameters": [
+          {
+            "name": "manifest_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Manifest Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyHashListIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/verifications/{verification_id}/report": {
+      "get": {
+        "tags": [
+          "verification"
+        ],
+        "summary": "人类可读 Markdown 核验报告",
+        "operationId": "verification_report_api_v1_verifications__verification_id__report_get",
+        "parameters": [
+          {
+            "name": "verification_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Verification Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/manifests/{manifest_id}/export": {
+      "get": {
+        "tags": [
+          "export"
+        ],
+        "summary": "导出 JSON 证据包（清单+版本链+交接+验证+审计事件+链校验）",
+        "operationId": "export_package_api_v1_manifests__manifest_id__export_get",
+        "parameters": [
+          {
+            "name": "manifest_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Manifest Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/manifests/{manifest_id}/report": {
+      "get": {
+        "tags": [
+          "export"
+        ],
+        "summary": "基于最近一次验证生成 Markdown 核验报告",
+        "operationId": "latest_report_api_v1_manifests__manifest_id__report_get",
+        "parameters": [
+          {
+            "name": "manifest_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Manifest Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit/events": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "查询审计事件（仅追加哈希链）",
+        "operationId": "get_audit_events_api_v1_audit_events_get",
+        "parameters": [
+          {
+            "name": "object_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Object Type"
+            }
+          },
+          {
+            "name": "object_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Object Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 10000,
+              "minimum": 1,
+              "default": 200,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit/verify": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "重算全链，校验审计哈希链完整性",
+        "operationId": "verify_audit_chain_api_v1_audit_verify_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AppendEntriesIn": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/EntryIn"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Entries"
+          },
+          "operator": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "title": "AppendEntriesIn"
+      },
+      "CorrectIn": {
+        "properties": {
+          "case_no": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Case No"
+          },
+          "evidence_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Id"
+          },
+          "collected_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collected At"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timezone"
+          },
+          "operator": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Operator",
+            "description": "发起更正的操作者"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Reason",
+            "description": "更正原因，写入审计"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/EntryIn"
+            },
+            "type": "array",
+            "title": "Entries",
+            "description": "更正后新版本的完整条目集"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "operator",
+          "reason",
+          "entries"
+        ],
+        "title": "CorrectIn",
+        "description": "对已封存版本发起更正，生成同 lineage 的新版本（新版本初始为 open）。"
+      },
+      "EntryIn": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Path",
+            "description": "文件在介质中的路径"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Size",
+            "description": "字节数"
+          },
+          "sha256": {
+            "type": "string",
+            "title": "Sha256",
+            "description": "整文件 SHA-256"
+          },
+          "chunk_size": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Size",
+            "description": "分块大小（字节）"
+          },
+          "chunk_hashes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Hashes",
+            "description": "按序排列的分块 SHA-256"
+          },
+          "mtime": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mtime",
+            "description": "文件修改时间，ISO-8601 且带时区偏移"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "size",
+          "sha256"
+        ],
+        "title": "EntryIn"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HandoffCreateIn": {
+        "properties": {
+          "from_party": {
+            "type": "string",
+            "minLength": 1,
+            "title": "From Party",
+            "description": "交出方（姓名/单位/警号）"
+          },
+          "to_party": {
+            "type": "string",
+            "minLength": 1,
+            "title": "To Party",
+            "description": "接收方（姓名/单位/警号）"
+          },
+          "occurred_at": {
+            "type": "string",
+            "title": "Occurred At",
+            "description": "交接发生时间，ISO-8601 带偏移"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone",
+            "default": "Asia/Shanghai"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "from_party",
+          "to_party",
+          "occurred_at"
+        ],
+        "title": "HandoffCreateIn"
+      },
+      "HashListEntryIn": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "sha256": {
+            "type": "string",
+            "title": "Sha256"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          },
+          "chunk_size": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Size"
+          },
+          "chunk_hashes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Hashes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "title": "HashListEntryIn",
+        "description": "hash_list 模式条目：path + sha256（可带分块），元数据字段可省略。"
+      },
+      "ManifestCreateIn": {
+        "properties": {
+          "case_no": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Case No",
+            "description": "案件编号"
+          },
+          "evidence_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Evidence Id",
+            "description": "证物标识"
+          },
+          "collected_at": {
+            "type": "string",
+            "title": "Collected At",
+            "description": "采集时间，ISO-8601 且带时区偏移"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone",
+            "description": "采集操作者所在 IANA 时区，如 Asia/Shanghai"
+          },
+          "operator": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Operator",
+            "description": "操作者"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/EntryIn"
+            },
+            "type": "array",
+            "title": "Entries",
+            "description": "初始条目，可为空后追加"
+          }
+        },
+        "type": "object",
+        "required": [
+          "case_no",
+          "evidence_id",
+          "collected_at",
+          "timezone",
+          "operator"
+        ],
+        "title": "ManifestCreateIn"
+      },
+      "SealIn": {
+        "properties": {
+          "operator": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Operator"
+          },
+          "occurred_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Occurred At",
+            "description": "封存发生时间，ISO-8601 带偏移；缺省为服务端当前时间"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone",
+            "default": "Asia/Shanghai"
+          },
+          "acknowledge_issues": {
+            "type": "boolean",
+            "title": "Acknowledge Issues",
+            "description": "存在路径歧义条目时必须显式置 true 才可封存",
+            "default": false
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "operator"
+        ],
+        "title": "SealIn"
+      },
+      "SignoffIn": {
+        "properties": {
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor",
+            "description": "实际签收人；为空将记录身份缺失"
+          },
+          "actor_id_no": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor Id No",
+            "description": "签收人证件/编号"
+          },
+          "occurred_at": {
+            "type": "string",
+            "title": "Occurred At",
+            "description": "签收时间，ISO-8601 带偏移"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone",
+            "default": "Asia/Shanghai"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "occurred_at"
+        ],
+        "title": "SignoffIn"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "VerifyEntryIn": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Size"
+          },
+          "sha256": {
+            "type": "string",
+            "title": "Sha256"
+          },
+          "chunk_size": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Size"
+          },
+          "chunk_hashes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Hashes"
+          },
+          "mtime": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mtime"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "size",
+          "sha256"
+        ],
+        "title": "VerifyEntryIn"
+      },
+      "VerifyHashListIn": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "pattern": "^(metadata|hash_list)$",
+            "title": "Mode",
+            "default": "hash_list"
+          },
+          "collected_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collected At"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone",
+            "default": "Asia/Shanghai"
+          },
+          "operator": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/HashListEntryIn"
+            },
+            "type": "array",
+            "title": "Entries"
+          }
+        },
+        "type": "object",
+        "title": "VerifyHashListIn"
+      },
+      "VerifyMetadataIn": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "pattern": "^(metadata|hash_list)$",
+            "title": "Mode",
+            "default": "metadata"
+          },
+          "collected_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collected At",
+            "description": "重新采集时间，ISO-8601 带偏移"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone",
+            "default": "Asia/Shanghai"
+          },
+          "operator": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/VerifyEntryIn"
+            },
+            "type": "array",
+            "title": "Entries"
+          }
+        },
+        "type": "object",
+        "title": "VerifyMetadataIn"
+      }
+    }
+  }
+}

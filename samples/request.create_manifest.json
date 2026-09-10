@@ -1,0 +1,27 @@
+{
+  "case_no": "A-2026-0917",
+  "evidence_id": "USB-KINGSTON-64G-03",
+  "collected_at": "2026-09-01T09:30:00+08:00",
+  "timezone": "Asia/Shanghai",
+  "operator": "李探员(11023)",
+  "note": "嫌疑人移动U盘初次采集，写保护接入",
+  "entries": [
+    {
+      "path": "DCIM/IMG_0001.jpg",
+      "size": 2485760,
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "mtime": "2026-08-20T22:14:03+08:00"
+    },
+    {
+      "path": "Images/banner.png",
+      "size": 524288,
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "chunk_size": 4096,
+      "chunk_hashes": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ],
+      "mtime": "2026-08-18T12:00:00+08:00"
+    }
+  ]
+}
